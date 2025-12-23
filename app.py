@@ -5,29 +5,19 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 1. UI & STYLE CONFIG
-st.set_page_config(layout="wide", page_title="MEDALLION ULTIMATE V15")
+# 1. UI TRADINGVIEW DARK THEME
+st.set_page_config(layout="wide", page_title="MEDALLION TERMINAL PRO")
 st.markdown("""
     <style>
-    .main { background-color: #05070a; }
-    .stMetric { background: #11151c; border: 1px solid #1e222d; padding: 15px; border-radius: 10px; }
+    .main { background-color: #131722; } /* Warna Dasar TradingView */
+    [data-testid="stSidebar"] { background-color: #1e222d; border-right: 1px solid #363a45; }
+    .stMetric { background: #1e222d; border: 1px solid #363a45; padding: 10px; border-radius: 4px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- FUNGSI DETEKSI S&R OTOMATIS ---
-def get_sr_levels(df):
-    levels = []
-    # Mengambil sampel data terakhir untuk deteksi fractal
-    for i in range(2, len(df) - 2):
-        if df['Low'][i] < df['Low'][i-1] and df['Low'][i] < df['Low'][i+1] and df['Low'][i+1] < df['Low'][i+2] and df['Low'][i-1] < df['Low'][i-2]:
-            levels.append((df.index[i], df['Low'][i], 'Support'))
-        if df['High'][i] > df['High'][i-1] and df['High'][i] > df['High'][i+1] and df['High'][i+1] > df['High'][i+2] and df['High'][i-1] > df['High'][i-2]:
-            levels.append((df.index[i], df['High'][i], 'Resistance'))
-    return levels
-
-# --- DATA ENGINE ---
+# --- ENGINE DATA & S&R ---
 @st.cache_data(ttl=60)
-def fetch_data_v15(ticker, tf):
+def fetch_tv_data(ticker, tf):
     if len(ticker) == 4 and ".JK" not in ticker: ticker = f"{ticker}.JK"
     elif len(ticker) >= 3 and "-" not in ticker and ".JK" not in ticker: ticker = f"{ticker}-USD"
     
@@ -41,78 +31,67 @@ def fetch_data_v15(ticker, tf):
         if tf == "4h":
             df = df.resample('4H').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
         return df, ticker
-    except:
-        return pd.DataFrame(), ticker
+    except: return pd.DataFrame(), ticker
 
-# 2. SIDEBAR & INPUT
-st.sidebar.title("🏛️ MEDALLION ENGINE")
+# 2. SIDEBAR CONFIG
+st.sidebar.title("🛠️ CHART SETTINGS")
 ticker_input = st.sidebar.text_input("Asset Symbol", "BTC").upper()
 tf_input = st.sidebar.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
+show_volume = st.sidebar.toggle("Show Volume Overlay", value=True)
 
-df, final_ticker = fetch_data_v15(ticker_input, tf_input)
+df, final_ticker = fetch_tv_data(ticker_input, tf_input)
 
 if not df.empty and len(df) > 20:
-    # --- QUANT CALCULATIONS ---
+    # --- INDICATORS ---
     df['MA20'] = df['Close'].rolling(20).mean()
     df['STD'] = df['Close'].rolling(20).std()
     df['Z'] = (df['Close'] - df['MA20']) / df['STD']
     df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
     df['EMA200'] = df['Close'].rolling(min(len(df), 200)).mean()
-
+    
     last = df.iloc[-1]
-    last_price = last['Close']
-    z_val = last['Z']
-    atr_val = last['ATR']
+    
+    # 3. TOP METRICS BAR
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("PRICE", f"{last['Close']:,.2f}")
+    c2.metric("CHANGE", f"{( (last['Close']-df['Open'].iloc[-1]) / df['Open'].iloc[-1] * 100):.2f}%")
+    c3.metric("ATR", f"{last['ATR']:.2f}")
+    c4.metric("VOL", f"{last['Volume']:,.0f}")
 
-    # --- SIDEBAR EXECUTION PLAN (DIJAMIN MUNCUL) ---
+    # 4. DYNAMIC CHART (TRADINGVIEW STYLE)
+    # Create subplot: 1 main chart with a hidden volume axis
+    fig = make_subplots(rows=1, cols=1, specs=[[{"secondary_y": True}]])
+
+    # Candlestick
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        name="Market", increasing_line_color='#089981', decreasing_line_color='#f23645',
+        increasing_fillcolor='#089981', decreasing_fillcolor='#f23645'
+    ), secondary_y=True)
+
+    # EMA 200 (Smoothing)
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], line=dict(color='#ff9800', width=1.5), name="EMA 200"), secondary_y=True)
+
+    # S&R ZONES (Dynamic Area)
+    # Detect recent peaks for Support/Resistance
+    recent_df = df.tail(100)
+    sup = recent_df['Low'].min()
+    res = recent_df['High'].max()
+    
+    # Add Support Zone
+    fig.add_hrect(y0=sup * 0.998, y1=sup * 1.002, fillcolor="green", opacity=0.1, line_width=0, secondary_y=True)
+    # Add Resistance Zone
+    fig.add_hrect(y0=res * 0.998, y1=res * 1.002, fillcolor="red", opacity=0.1, line_width=0, secondary_y=True)
+
+    # Volume Overlay (Like TradingView)
+    if show_volume:
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['Volume'], name="Volume", 
+            marker_color='rgba(128, 128, 128, 0.2)', yaxis="y"
+        ), secondary_y=False)
+
+    # 5. EXECUTION PLAN ON SIDEBAR
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🎯 TRADING PLAN")
-    
-    if z_val < -2.1:
-        status, color = "🚀 LONG", "lime"
-        tp, sl = last_price + (atr_val * 2.5), last_price - (atr_val * 1.5)
-    elif z_val > 2.1:
-        status, color = "🔻 SHORT", "red"
-        tp, sl = last_price - (atr_val * 2.5), last_price + (atr_val * 1.5)
-    else:
-        status, color = "⚪ NEUTRAL", "gray"
-        tp, sl = last_price * 1.03, last_price * 0.98
-
-    st.sidebar.markdown(f"### Status: <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
-    st.sidebar.write(f"**Entry:** {last_price:,.2f}")
-    st.sidebar.success(f"**TP:** {tp:,.2f}")
-    st.sidebar.error(f"**SL:** {sl:,.2f}")
-
-    # 3. DASHBOARD MAIN
-    st.header(f"Terminal: {final_ticker}")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Live Price", f"{last_price:,.2f}")
-    m2.metric("Z-Score", f"{z_val:.2f}")
-    m3.metric("ATR Vol", f"{atr_val:.2f}")
-    m4.metric("Trend", "BULL" if last_price > last['EMA200'] else "BEAR")
-
-    # 4. PRO CHARTING (Candle + S&R + Volume Profile)
-    fig = make_subplots(rows=1, cols=2, column_widths=[0.8, 0.2], shared_yaxes=True, horizontal_spacing=0.01)
-    
-    # Candlestick & EMA
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], line=dict(color='orange', width=1.5), name="EMA 200"), row=1, col=1)
-    
-    # --- TAMBAHKAN GARIS S&R OTOMATIS ---
-    sr_levels = get_sr_levels(df.tail(150))
-    for lvl in sr_levels:
-        ln_color = "rgba(0, 255, 200, 0.3)" if lvl[2] == 'Support' else "rgba(255, 0, 100, 0.3)"
-        fig.add_shape(type="line", x0=lvl[0], y0=lvl[1], x1=df.index[-1], y1=lvl[1], 
-                      line=dict(color=ln_color, width=1, dash="dash"), row=1, col=1)
-
-    # Volume Profile
-    price_bins = pd.cut(df['Close'], bins=50)
-    vpro = df.groupby(price_bins, observed=False)['Volume'].sum()
-    fig.add_trace(go.Bar(x=vpro.values, y=[b.mid for b in vpro.index], orientation='h', 
-                         marker_color='rgba(100, 200, 255, 0.2)', name="VPVR"), row=1, col=2)
-
-    fig.update_layout(height=800, template="plotly_dark", xaxis_rangeslider_visible=False, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.info("Menunggu input simbol (Contoh: BBCA atau BTC)")
+    st.sidebar.subheader("🎯 TRADE SIGNAL")
+    if last['Z'] < -2.1:
+        st.sidebar.success(f"**SIGNAL: BUY**\n\nTP: {last['Close']+(last['ATR']*2.5):,.2f}\
