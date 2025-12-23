@@ -4,32 +4,29 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 1. KONFIGURASI HALAMAN
-st.set_page_config(layout="wide", page_title="Medallion Future Terminal")
-st.title("📊 Medallion Alpha v8.0 (Future & Stock)")
+# CONFIGURASI UI BERKELAS
+st.set_page_config(layout="wide", page_title="QUANT TERMINAL PRO")
+st.markdown("""
+    <style>
+    .main { background-color: #0E1117; }
+    div[data-testid="stMetricValue"] { font-size: 22px; color: #00FFCC; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- SIDEBAR CONTROL ---
-st.sidebar.header("🚀 LIVE CONTROL")
-asset_mode = st.sidebar.radio("Mode Aset", ["Crypto (BTCUSDT, ETHUSDT)", "Saham (BBCA, TLKM, NVDA)"])
-input_user = st.sidebar.text_input("Ketik Simbol", "BTC-USD").upper()
+st.title("🏛️ Medallion Quant Terminal")
+
+# SIDEBAR PRO
+st.sidebar.title("STRETEGY ENGINE")
+asset_mode = st.sidebar.selectbox("Market Mode", ["Crypto Future", "Stock Market"])
+input_user = st.sidebar.text_input("Asset Symbol", "BTC-USD").upper()
 tf = st.sidebar.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
 
-# AUTO-FIXER SIMBOL (Agar pasti terbaca oleh sistem)
-if asset_mode == "Crypto (BTCUSDT, ETHUSDT)":
-    # Jika user ketik BTCUSDT, ubah ke BTC-USD agar yfinance bisa baca
-    simbol_final = input_user.replace("USDT", "-USD")
-    if "-" not in simbol_final: simbol_final = f"{input_user}-USD"
-else:
-    # Jika saham Indo 4 huruf, tambah .JK
-    if len(input_user) == 4 and ".JK" not in input_user:
-        simbol_final = f"{input_user}.JK"
-    else:
-        simbol_final = input_user
+# ANALYTIC PARAMETERS
+z_threshold = st.sidebar.slider("Z-Score Threshold", 1.5, 3.0, 2.2)
 
-# 2. AMBIL DATA
+# FETCH DATA
 @st.cache_data(ttl=30)
-def get_data_stable(s, t):
-    # Ambil data lebih banyak agar EMA200 tidak kosong
+def get_pro_data(s, t):
     p = "1mo" if t not in ["4h", "1d"] else "2y"
     i = "1h" if t == "4h" else t
     d = yf.download(s, period=p, interval=i, progress=False, auto_adjust=True)
@@ -38,68 +35,69 @@ def get_data_stable(s, t):
         d = d.resample('4H').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
     return d
 
-df = get_data_stable(simbol_final, tf)
+df = get_pro_data(input_user, tf)
 
-# 3. LOGIKA TRADING & DISPLAY
 if not df.empty:
-    # Indikator
+    # --- QUANTITATIVE ENGINE ---
+    # 1. Z-Score (Mean Reversion)
     df['MA20'] = df['Close'].rolling(20).mean()
     df['STD'] = df['Close'].rolling(20).std()
     df['Z_Score'] = (df['Close'] - df['MA20']) / df['STD']
-    df['EMA200'] = df['Close'].rolling(200).mean()
     
+    # 2. ATR (Volatility Based Stop Loss)
+    high_low = df['High'] - df['Low']
+    df['ATR'] = high_low.rolling(14).mean()
+    
+    # 3. EMA 200 (Trend Filter)
+    df['EMA200'] = df['Close'].rolling(200).mean()
+
+    # LOGIK SIGNAL
     last_row = df.iloc[-1]
     last_price = last_row['Close']
-    z_val = last_row['Z_Score']
+    atr_val = last_row['ATR']
     
-    # --- PANEL SIDEBAR: ENTRY, SL, TP (WAJIB ADA) ---
+    # SIDEBAR ACTION CENTER
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🎯 FUTURE TRADING PLAN")
+    st.sidebar.subheader("⚡ EXECUTION PLAN")
     
-    # Logika Penentuan Status
-    if z_val < -2.1:
-        status = "🟢 LONG (BUY)"
-        color = "green"
-        tp = last_price * 1.03
-        sl = last_price * 0.98
-    elif z_val > 2.1:
-        status = "🔴 SHORT (SELL)"
-        color = "red"
-        tp = last_price * 0.97
-        sl = last_price * 1.02
+    if last_row['Z_Score'] < -z_threshold:
+        st.sidebar.success("🚀 POSITION: LONG")
+        tp = last_price + (atr_val * 2) # TP berdasarkan volatilitas
+        sl = last_price - (atr_val * 1.5)
+        st.sidebar.write(f"**Entry:** {last_price:,.2f}")
+        st.sidebar.write(f"**TP (ATR 2.0):** {tp:,.2f}")
+        st.sidebar.write(f"**SL (ATR 1.5):** {sl:,.2f}")
+    elif last_row['Z_Score'] > z_threshold:
+        st.sidebar.error("🔻 POSITION: SHORT")
+        tp = last_price - (atr_val * 2)
+        sl = last_price + (atr_val * 1.5)
+        st.sidebar.write(f"**Entry:** {last_price:,.2f}")
+        st.sidebar.write(f"**TP (ATR 2.0):** {tp:,.2f}")
+        st.sidebar.write(f"**SL (ATR 1.5):** {sl:,.2f}")
     else:
-        status = "⚪ WAIT / NEUTRAL"
-        color = "gray"
-        tp = 0
-        sl = 0
+        st.sidebar.info("Neutral - No Signal")
 
-    # Menampilkan Status & Angka
-    st.sidebar.markdown(f"### Status: {status}")
-    st.sidebar.write(f"**Entry Price:** {last_price:,.2f}")
-    if tp > 0:
-        st.sidebar.success(f"**Take Profit:** {tp:,.2f}")
-        st.sidebar.error(f"**Stop Loss:** {sl:,.2f}")
-    st.sidebar.write(f"**Volume 24h:** {df['Volume'].iloc[-1]:,.0f}")
+    # MAIN DASHBOARD METRICS
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Live Price", f"{last_price:,.2f}")
+    m2.metric("Z-Score", f"{last_row['Z_Score']:.2f}")
+    m3.metric("ATR (Volatility)", f"{atr_val:.4f}")
+    m4.metric("Trend State", "BULLISH" if last_price > last_row['EMA200'] else "BEARISH")
 
-    # 4. METRICS HEADER
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Price", f"{last_price:,.2f}")
-    c2.metric("Z-Score", f"{z_val:.2f}")
-    c3.metric("EMA 200", f"{last_row['EMA200']:,.2f}")
-    c4.metric("Market Trend", "BULL" if last_price > last_row['EMA200'] else "BEAR")
-
-    # 5. GRAFIK
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+    # PRO CHARTING
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.8, 0.2])
     
-    # Plot Sinyal
-    longs = df[df['Z_Score'] < -2.1]
-    shorts = df[df['Z_Score'] > 2.1]
-    fig.add_trace(go.Scatter(x=longs.index, y=longs['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='lime'), name="Long Signal"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=shorts.index, y=shorts['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='red'), name="Short Signal"), row=1, col=1)
+    # Candlestick
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Market"), row=1, col=1)
+    
+    # EMA 200 Line
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], line=dict(color='#FFD700', width=1.5), name="EMA 200"), row=1, col=1)
 
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name="Volume", marker_color='orange'), row=2, col=1)
-    fig.update_layout(height=800, template="plotly_dark", xaxis_rangeslider_visible=False)
+    # Volume
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='#1f77b4', name="Volume"), row=2, col=1)
+
+    fig.update_layout(height=850, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
+
 else:
-    st.error("Gagal memuat data. Gunakan simbol BTC-USD atau BBCA.")
+    st.error("Invalid Symbol or Data Timeout.")
