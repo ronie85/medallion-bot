@@ -1,85 +1,103 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 1. UI SETUP
-st.set_page_config(layout="wide", page_title="MEDALLION SCANNER PRO")
-st.markdown("""<style>.main { background-color: #05070a; } .stMetric { border: 1px solid #1e222d; padding: 10px; }</style>""", unsafe_allow_html=True)
+# 1. UI PRO SETUP
+st.set_page_config(layout="wide", page_title="MEDALLION QUANT V12")
+st.markdown("""<style>.main { background-color: #05070a; } .stMetric { border-radius: 10px; background: #11151c; border: 1px solid #1e222d; }</style>""", unsafe_allow_html=True)
 
-# 2. SCANNER ENGINE
-def scan_asset(ticker, tf):
+# --- FUNGSI DETEKSI S&R OTOMATIS ---
+def get_sr_levels(df):
+    levels = []
+    for i in range(2, df.shape[0] - 2):
+        # Deteksi Fractal (Low & High)
+        if df['Low'][i] < df['Low'][i-1] and df['Low'][i] < df['Low'][i+1] and df['Low'][i+1] < df['Low'][i+2] and df['Low'][i-1] < df['Low'][i-2]:
+            levels.append((df.index[i], df['Low'][i], 'Support'))
+        if df['High'][i] > df['High'][i-1] and df['High'][i] > df['High'][i+1] and df['High'][i+1] > df['High'][i+2] and df['High'][i-1] > df['High'][i-2]:
+            levels.append((df.index[i], df['High'][i], 'Resistance'))
+    return levels
+
+# --- DATA ENGINE ---
+@st.cache_data(ttl=60)
+def get_data_v12(ticker, tf):
     if len(ticker) == 4 and ".JK" not in ticker: ticker = f"{ticker}.JK"
     elif len(ticker) >= 3 and "-" not in ticker and ".JK" not in ticker: ticker = f"{ticker}-USD"
     
-    data = yf.download(ticker, period="1mo" if tf not in ["4h", "1d"] else "2y", interval="1h" if tf == "4h" else tf, progress=False, auto_adjust=True)
-    if data.empty: return None
-    if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+    p = "1mo" if tf not in ["4h", "1d"] else "2y"
+    i = "1h" if tf == "4h" else tf
+    d = yf.download(ticker, period=p, interval=i, progress=False, auto_adjust=True)
+    if isinstance(d.columns, pd.MultiIndex): d.columns = d.columns.get_level_values(0)
     
-    # Calculate Indicators
-    data['MA20'] = data['Close'].rolling(20).mean()
-    data['STD'] = data['Close'].rolling(20).std()
-    data['Z'] = (data['Close'] - data['MA20']) / data['STD']
-    data['EMA200'] = data['Close'].rolling(200).mean()
-    
-    last = data.iloc[-1]
-    status = "NEUTRAL"
-    if last['Z'] < -2.1: status = "🟢 LONG"
-    elif last['Z'] > 2.1: status = "🔴 SHORT"
-    
-    return {"Symbol": ticker, "Price": last['Close'], "Z-Score": round(last['Z'], 2), "Trend": "BULL" if last['Close'] > last['EMA200'] else "BEAR", "Signal": status}
+    if tf == "4h" and not d.empty:
+        d = d.resample('4H').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+    return d, ticker
 
-# 3. SIDEBAR & NAVIGATION
-st.sidebar.title("🏛️ CONTROL CENTER")
-mode = st.sidebar.radio("Pilih Tampilan", ["Single Asset Analysis", "Multi-Asset Scanner"])
+# 2. SIDEBAR
+st.sidebar.title("🏛️ QUANT V12 ENGINE")
+ticker_input = st.sidebar.text_input("Asset Symbol", "BTC").upper()
+tf_input = st.sidebar.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
+show_sr = st.sidebar.checkbox("Tampilkan S&R Otomatis", value=True)
 
-if mode == "Multi-Asset Scanner":
-    st.header("🔍 Real-Time Market Scanner")
-    watchlist = ["BTC-USD", "ETH-USD", "SOL-USD", "BBCA.JK", "BMRI.JK", "GOTO.JK", "NVDA", "TSLA", "AAPL"]
+df, final_ticker = get_data_v12(ticker_input, tf_input)
+
+if not df.empty:
+    # 3. RUMUS LANJUTAN (Z-SCORE + ATR + VOLATILITY)
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['STD'] = df['Close'].rolling(20).std()
+    df['Z'] = (df['Close'] - df['MA20']) / df['STD']
+    df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
+    df['EMA200'] = df['Close'].rolling(200).mean()
+
+    # 4. DASHBOARD HEADER
+    last = df.iloc[-1]
+    atr = last['ATR']
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Live Price", f"{last['Close']:,.2f}")
+    c2.metric("Z-Score", f"{last['Z']:.2f}")
+    c3.metric("ATR Volatility", f"{atr:.2f}")
+    c4.metric("EMA 200", f"{last['EMA200']:,.2f}")
+
+    # 5. CHARTING DENGAN S&R
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.8, 0.2])
     
-    results = []
-    with st.spinner('Scanning Market...'):
-        for asset in watchlist:
-            res = scan_asset(asset, "1h")
-            if res: results.append(res)
+    # Candlestick
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Market"), row=1, col=1)
     
-    df_scan = pd.DataFrame(results)
-    st.table(df_scan) # Tampilan tabel scanner yang bersih
-    st.info("Scanner ini memantau Crypto, Saham Indo, dan Saham US secara bersamaan.")
+    # EMA 200
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], line=dict(color='orange', width=1.5), name="EMA 200"), row=1, col=1)
+
+    # SINYAL LONG/SHORT
+    longs = df[df['Z'] < -2.2]
+    shorts = df[df['Z'] > 2.2]
+    fig.add_trace(go.Scatter(x=longs.index, y=longs['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='lime'), name="Long Signal"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=shorts.index, y=shorts['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='red'), name="Short Signal"), row=1, col=1)
+
+    # --- S&R LOGIC ---
+    if show_sr:
+        sr_levels = get_sr_levels(df.tail(200)) # Ambil level dari 200 candle terakhir
+        for lvl in sr_levels:
+            color = "rgba(0, 255, 200, 0.4)" if lvl[2] == 'Support' else "rgba(255, 0, 100, 0.4)"
+            fig.add_shape(type="line", x0=lvl[0], y0=lvl[1], x1=df.index[-1], y1=lvl[1], 
+                          line=dict(color=color, width=1, dash="dash"), row=1, col=1)
+
+    # Volume
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='#1f77b4', name="Volume"), row=2, col=1)
+
+    fig.update_layout(height=850, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ACTION PLAN SIDEBAR
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎯 EXECUTION PLAN")
+    if last['Z'] < -2.2:
+        st.sidebar.success(f"**SIGNAL: LONG**\n\nTP: {last['Close']+(atr*2.5):,.2f}\n\nSL: {last['Close']-(atr*1.5):,.2f}")
+    elif last['Z'] > 2.2:
+        st.sidebar.error(f"**SIGNAL: SHORT**\n\nTP: {last['Close']-(atr*2.5):,.2f}\n\nSL: {last['Close']+(atr*1.5):,.2f}")
+    else:
+        st.sidebar.info("Wait for Extreme Signal")
 
 else:
-    # --- SINGLE ASSET ANALYSIS (KODE V10 SEBELUMNYA) ---
-    ticker_input = st.sidebar.text_input("Asset Symbol", "BTC").upper()
-    tf_input = st.sidebar.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
-    
-    # 
-    
-    # Ambil Data untuk Chart
-    if len(ticker_input) == 4 and ".JK" not in ticker_input: ticker_final = f"{ticker_input}.JK"
-    elif len(ticker_input) >= 3 and "-" not in ticker_input and ".JK" not in ticker_input: ticker_final = f"{ticker_input}-USD"
-    else: ticker_final = ticker_input
-    
-    df = yf.download(ticker_final, period="2y" if tf_input in ["1d", "4h"] else "1mo", interval="1h" if tf_input=="4h" else tf_input, progress=False, auto_adjust=True)
-    if not df.empty:
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        # Indikator Dasar
-        df['MA20'] = df['Close'].rolling(20).mean()
-        df['STD'] = df['Close'].rolling(20).std()
-        df['Z'] = (df['Close'] - df['MA20']) / df['STD']
-        df['EMA200'] = df['Close'].rolling(200).mean()
-        
-        last = df.iloc[-1]
-        
-        # Display Metrics
-        c1, c2, c3 = st.columns(3)
-        c1.metric(f"Price {ticker_final}", f"{last['Close']:,.2f}")
-        c2.metric("Z-Score", f"{last['Z']:.2f}")
-        c3.metric("Signal", "🟢 LONG" if last['Z'] < -2.1 else "🔴 SHORT" if last['Z'] > 2.1 else "⚪ WAIT")
-        
-        # Charting
-        fig = make_subplots(rows=1, cols=1)
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"))
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], line=dict(color='yellow', width=1), name="EMA 200"))
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+    st.error("Invalid Symbol. Gunakan BTC, BBCA, atau NVDA.")
