@@ -1,24 +1,23 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 1. SETUP UI (Sesuai Foto Anda)
+# 1. SETUP TAMPILAN (Sesuai Foto: Dark Blue Theme)
 st.set_page_config(layout="wide", page_title="MEDALLION ALPHA X TRADINGVIEW")
 st.markdown("""
     <style>
     .main { background-color: #131722; }
     div[data-testid="stMetric"] { background-color: #1e222d; border: 1px solid #363a45; padding: 15px; border-radius: 8px; }
-    [data-testid="stMetricValue"] { font-size: 22px !important; color: #00FFCC !important; }
+    [data-testid="stMetricValue"] { font-size: 24px !important; color: #00FFCC !important; }
     </style>
     """, unsafe_allow_html=True)
 
 # --- DATA ENGINE ---
 @st.cache_data(ttl=60)
-def fetch_medallion_data(ticker, tf):
-    # Auto-Fixer Simbol
+def fetch_data(ticker, tf):
+    # Fixer Simbol Otomatis
     if len(ticker) == 4 and ".JK" not in ticker: ticker = f"{ticker}.JK"
     elif "USDT" in ticker: ticker = ticker.replace("USDT", "-USD")
     elif len(ticker) >= 3 and "-" not in ticker and ".JK" not in ticker: ticker = f"{ticker}-USD"
@@ -36,76 +35,62 @@ def fetch_medallion_data(ticker, tf):
 # 2. SIDEBAR (Urutan Persis Seperti Foto Anda)
 st.sidebar.title("🏛️ MEDALLION ALPHA")
 ticker_input = st.sidebar.text_input("Simbol", "BTC").upper()
-tf_input = st.sidebar.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
+tf_input = st.sidebar.selectbox("Timeframe Chart", ["15m", "30m", "1h", "4h", "1d"], index=2)
 
-df, final_ticker = fetch_medallion_data(ticker_input, tf_input)
+df, final_ticker = fetch_data(ticker_input, tf_input)
 
 if not df.empty and len(df) > 30:
-    # --- LOGIKA INTERNAL (MFI & ADX) ---
+    # --- LOGIKA INTERNAL (Hanya untuk Sinyal) ---
     df['MA20'] = df['Close'].rolling(20).mean()
     df['Z'] = (df['Close'] - df['MA20']) / df['Close'].rolling(20).std()
-    
-    # ADX
-    tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift()).abs(), (df['Low']-df['Close'].shift()).abs()], axis=1).max(axis=1)
-    plus_dm = df['High'].diff().clip(lower=0)
-    minus_dm = df['Low'].diff().clip(upper=0).abs()
-    atr_14 = tr.rolling(14).mean()
-    df['ADX'] = 100 * (abs((plus_dm.rolling(14).mean()/atr_14) - (minus_dm.rolling(14).mean()/atr_14)) / ((plus_dm.rolling(14).mean()/atr_14) + (minus_dm.rolling(14).mean()/atr_14))).rolling(14).mean()
-    
-    # MFI
-    tp = (df['High'] + df['Low'] + df['Close']) / 3
-    mf = tp * df['Volume']
-    df['MFI'] = 100 - (100 / (1 + (mf.where(tp > tp.shift(1), 0).rolling(14).sum() / mf.where(tp < tp.shift(1), 0).rolling(14).sum())))
-    
     last = df.iloc[-1]
-
-    # 3. HEADER METRICS (4 Kotak di Atas)
+    
+    # 3. HEADER METRICS (Kembali ke versi awal Anda)
     st.header(f"📊 {final_ticker} Terminal")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("PRICE", f"{last['Close']:,.2f}")
-    m2.metric("MFI (MONEY FLOW)", f"{last['MFI']:.1f}")
-    m3.metric("ADX (STRENGTH)", f"{last['ADX']:.1f}")
+    
+    # Sinyal Sederhana Berbasis Z-Score agar dashboard tidak penuh
+    if last['Z'] < -2.1: sig_t, sig_c = "🚀 BUY", "#00FFCC"
+    elif last['Z'] > 2.1: sig_t, sig_c = "🔻 SELL", "#FF3366"
+    else: sig_t, sig_c = "⚪ NEUTRAL", "#999999"
+    
+    m2.metric("VOLATILITY", f"{last['Close'].pct_change():.2%}")
+    m3.metric("Z-SCORE", f"{last['Z']:.2f}")
+    m4.metric("SIGNAL", sig_t)
 
-    # Logika Signal 80% Akurasi
-    strong = last['ADX'] > 20
-    if last['Z'] < -2.1 and strong and last['MFI'] < 35: sig_t, sig_c = "🚀 STRONG BUY", "#00FFCC"
-    elif last['Z'] > 2.1 and strong and last['MFI'] > 65: sig_t, sig_c = "🔻 STRONG SELL", "#FF3366"
-    else: sig_t, sig_c = "⚪ SEARCHING...", "#999999"
-    m4.metric("ALGO SIGNAL", sig_t)
-
-    # 4. SIDEBAR S&R & PLAN (Sesuai Foto)
+    # 4. SIDEBAR ANGKA PETUNJUK & PLAN (Sesuai Foto)
     st.sidebar.markdown("---")
     st.sidebar.subheader("💎 ANGKA PETUNJUK S&R")
     sup, res = df['Low'].tail(50).min(), df['High'].tail(50).max()
     st.sidebar.write(f"**Resistance:** :red[{res:,.2f}]")
     st.sidebar.write(f"**Support:** :green[{sup:,.2f}]")
+
     st.sidebar.markdown("---")
     st.sidebar.subheader("🎯 TRADING PLAN")
     st.sidebar.markdown(f"**Status:** <span style='color:{sig_c}'>{sig_t}</span>", unsafe_allow_html=True)
     st.sidebar.write(f"**Entry:** {last['Close']:,.2f}")
 
-    # 5. CHARTING (Gaya TradingView Tanpa Install Tambahan)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.8, 0.2])
+    # 5. CHART (Gaya Klasik Foto Anda)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.8, 0.2])
     
-    # Candlestick
+    # Candlestick (Warna Klasik)
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name="Market", increasing_line_color='#089981', decreasing_line_color='#f23645'
     ), row=1, col=1)
     
-    # S&R Lines
+    # S&R Horizontal Lines
     fig.add_hline(y=sup, line_dash="dash", line_color="#00FFCC", opacity=0.4, row=1, col=1)
     fig.add_hline(y=res, line_dash="dash", line_color="#FF3366", opacity=0.4, row=1, col=1)
 
-    # Volume (Warna TradingView)
-    colors = ['#089981' if df['Close'][i] >= df['Open'][i] else '#f23645' for i in range(len(df))]
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, opacity=0.5, name="Volume"), row=2, col=1)
+    # Volume Bar
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='#363a45', name="Volume"), row=2, col=1)
 
-    # Konfigurasi Visual TradingView
+    # Layout Setup
     fig.update_layout(
         height=700, template="plotly_dark", paper_bgcolor='#131722', plot_bgcolor='#131722',
-        xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10),
-        hovermode="x unified"
+        xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10)
     )
     fig.update_yaxes(side="right", gridcolor='#2a2e39')
     fig.update_xaxes(gridcolor='#2a2e39')
@@ -113,4 +98,4 @@ if not df.empty and len(df) > 30:
     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.info("Pemuatan data...")
+    st.info("Input simbol dan tunggu pemuatan data...")
