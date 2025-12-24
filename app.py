@@ -1,108 +1,113 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import numpy as np
-from streamlit_lightweight_charts import renderLightweightCharts
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# 1. UI CONFIG
-st.set_page_config(layout="wide", page_title="MEDALLION QUANT PRO")
+# 1. STYLE CONFIG (TradingView Look)
+st.set_page_config(layout="wide", page_title="MEDALLION TITAN V20")
 st.markdown("""
     <style>
     .main { background-color: #131722; }
     div[data-testid="stMetric"] { background-color: #1e222d; border: 1px solid #363a45; padding: 15px; border-radius: 10px; }
+    [data-testid="stMetricValue"] { font-size: 24px !important; color: #00FFCC !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- ENGINE DATA & S&R ---
+# --- DATA ENGINE ---
 @st.cache_data(ttl=60)
-def get_pro_data(ticker, tf):
-    if len(ticker) == 4: ticker = f"{ticker}.JK"
+def fetch_stable_data(ticker, tf):
+    if len(ticker) == 4 and ".JK" not in ticker: ticker = f"{ticker}.JK"
     elif len(ticker) >= 3 and "-" not in ticker and ".JK" not in ticker: ticker = f"{ticker}-USD"
     
-    df = yf.download(ticker, period="1y", interval="1h" if tf == "4h" else tf, progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-    if tf == "4h":
-        df = df.resample('4H').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-    return df, ticker
+    interval_map = {"15m": "15m", "30m": "30m", "1h": "1h", "4h": "1h", "1d": "1d"}
+    p = "1mo" if tf in ["15m", "30m", "1h"] else "2y"
+    
+    try:
+        df = yf.download(ticker, period=p, interval=interval_map[tf], progress=False, auto_adjust=True)
+        if df.empty: return pd.DataFrame(), ticker
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        if tf == "4h":
+            df = df.resample('4H').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+        return df.astype(float), ticker
+    except:
+        return pd.DataFrame(), ticker
 
 # 2. SIDEBAR
-st.sidebar.title("🏛️ QUANT TERMINAL")
+st.sidebar.title("🏛️ MEDALLION TITAN")
 symbol_input = st.sidebar.text_input("Asset Symbol", "BTC").upper()
-tf_input = st.sidebar.selectbox("Timeframe", ["1h", "4h", "1d"], index=0)
+tf_input = st.sidebar.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
 
-df, final_ticker = get_pro_data(symbol_input, tf_input)
+df, final_ticker = fetch_stable_data(symbol_input, tf_input)
 
-if not df.empty:
-    # --- QUANT CALCULATIONS ---
+if not df.empty and len(df) > 20:
+    # --- INDICATORS ---
     df['MA20'] = df['Close'].rolling(20).mean()
     df['STD'] = df['Close'].rolling(20).std()
     df['Z'] = (df['Close'] - df['MA20']) / df['STD']
     df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
+    df['EMA200'] = df['Close'].rolling(min(len(df), 200)).mean()
     
+    # S&R LOGIC (Automated)
+    support = df['Low'].tail(50).min()
+    resistance = df['High'].tail(50).max()
     last = df.iloc[-1]
-    
-    # Deteksi S&R Otomatis (Fractal)
-    sup_val = df['Low'].tail(50).min()
-    res_val = df['High'].tail(50).max()
 
-    # --- TRADING PLAN SIDEBAR ---
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🎯 TRADING PLAN")
-    
+    # 3. METRICS HEADER
+    st.header(f"📊 {final_ticker} Professional Dashboard")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("PRICE", f"{last['Close']:,.2f}")
+    m2.metric("S&R ZONE", f"{support:,.0f} - {resistance:,.0f}")
+    m3.metric("ATR VOL", f"{last['ATR']:.2f}")
+
+    # Signal Logic
     if last['Z'] < -2.1:
-        status, col = "🚀 LONG", "#00FFCC"
+        sig, col = "🚀 LONG", "#00FFCC"
         tp, sl = last['Close']+(last['ATR']*2.5), last['Close']-(last['ATR']*1.5)
     elif last['Z'] > 2.1:
-        status, col = "🔻 SHORT", "#FF3366"
+        sig, col = "🔻 SHORT", "#FF3366"
         tp, sl = last['Close']-(last['ATR']*2.5), last['Close']+(last['ATR']*1.5)
     else:
-        status, col = "⚪ NEUTRAL", "#999999"
-        tp, sl = last['Close']*1.03, last['Close']*0.97
+        sig, col = "⚪ WAIT", "#999999"
+        tp, sl = last['Close']*1.03, last['Close']*0.98
+    m4.metric("SIGNAL", sig)
 
-    st.sidebar.markdown(f"### Status: <span style='color:{col}'>{status}</span>", unsafe_allow_html=True)
+    # 4. SIDEBAR TRADING PLAN
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎯 TRADING PLAN")
+    st.sidebar.markdown(f"**Status:** <span style='color:{col}'>{sig}</span>", unsafe_allow_html=True)
     st.sidebar.write(f"**Entry:** {last['Close']:,.2f}")
     st.sidebar.success(f"**Target Profit:** {tp:,.2f}")
     st.sidebar.error(f"**Stop Loss:** {sl:,.2f}")
 
-    # --- FORMAT DATA UNTUK LIGHTWEIGHT CHARTS ---
-    chart_data = df.reset_index()
-    chart_data.columns = ['time', 'open', 'high', 'low', 'close', 'volume'] + list(chart_data.columns[6:])
-    # Convert time to timestamp
-    chart_data['time'] = chart_data['time'].apply(lambda x: x.timestamp())
+    # 5. DYNAMIC CHART
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.8, 0.2])
 
-    # 3. MAIN DISPLAY
-    st.title(f"📈 {final_ticker} Professional Chart")
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Live Price", f"{last['Close']:,.2f}")
-    m2.metric("Support (Auto)", f"{sup_val:,.2f}")
-    m3.metric("Resistance (Auto)", f"{res_val:,.2f}")
+    # Candlestick
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        name="Market", increasing_line_color='#089981', decreasing_line_color='#f23645'
+    ), row=1, col=1)
 
-    # Konfigurasi Chart TradingView Style
-    chartOptions = {
-        "layout": {"background": {"type": "solid", "color": "#131722"}, "textColor": "#d1d4dc"},
-        "grid": {"vertLines": {"color": "#2a2e39"}, "horzLines": {"color": "#2a2e39"}},
-        "crosshair": {"mode": 0},
-        "priceScale": {"borderColor": "#485c7b"},
-        "timeScale": {"borderColor": "#485c7b", "timeVisible": True, "secondsVisible": False},
-    }
+    # EMA 200
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], line=dict(color='#ff9800', width=1.5), name="EMA 200"), row=1, col=1)
 
-    renderLightweightCharts([
-        {
-            "type": "Candlestick",
-            "data": chart_data[['time', 'open', 'high', 'low', 'close']].to_dict('records'),
-            "options": {
-                "upColor": "#089981", "downColor": "#f23645", 
-                "borderVisible": False, "wickUpColor": "#089981", "wickDownColor": "#f23645"
-            },
-            "markers": [
-                {"time": chart_data['time'].iloc[-1], "position": "belowBar", "color": "#00FFCC", "shape": "arrowUp", "text": "SUP"} if last['Close'] <= sup_val * 1.01 else {},
-            ]
-        }
-    ], chartOptions)
+    # Automated S&R Lines
+    fig.add_hline(y=support, line_dash="dash", line_color="#00FFCC", opacity=0.6, annotation_text="SUPPORT", row=1, col=1)
+    fig.add_hline(y=resistance, line_dash="dash", line_color="#FF3366", opacity=0.6, annotation_text="RESISTANCE", row=1, col=1)
 
-    # Menampilkan S&R sebagai teks bantuan karena limitasi library rendering sederhana
-    st.info(f"💡 **Analisis S&R Otomatis:** Harga saat ini tertahan di antara Support **{sup_val:,.2f}** dan Resistance **{res_val:,.2f}**.")
+    # Volume
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='#363a45', name="Volume"), row=2, col=1)
+
+    # Layout
+    fig.update_layout(
+        height=800, template="plotly_dark", paper_bgcolor='#131722', plot_bgcolor='#131722',
+        xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified"
+    )
+    fig.update_yaxes(side="right", gridcolor='#2a2e39')
+    fig.update_xaxes(gridcolor='#2a2e39')
+
+    st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.error("Gagal memuat data. Periksa simbol aset Anda.")
+    st.error("Masukkan simbol yang valid atau cek koneksi internet.")
