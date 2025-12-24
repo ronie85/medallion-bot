@@ -1,118 +1,115 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import streamlit.components.v1 as components
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# 1. UI CONFIG (Full Dark Mode)
-st.set_page_config(layout="wide", page_title="MEDALLION X TRADINGVIEW")
+# 1. STYLE (TETAP KONSISTEN)
+st.set_page_config(layout="wide", page_title="MEDALLION ALPHA X")
 st.markdown("""
     <style>
-    .main { background-color: #000000; }
-    div[data-testid="stMetric"] { 
-        background-color: #131722; 
-        border: 1px solid #363a45; 
-        padding: 15px; 
-        border-radius: 8px; 
-    }
-    [data-testid="stMetricValue"] { font-size: 24px !important; color: #00FFCC !important; }
-    iframe { border-radius: 8px; }
+    .main { background-color: #131722; }
+    div[data-testid="stMetric"] { background-color: #1e222d; border: 1px solid #363a45; padding: 15px; border-radius: 8px; }
+    [data-testid="stMetricValue"] { font-size: 22px !important; color: #00FFCC !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- QUANT ENGINE (Mencari Angka Petunjuk S&R) ---
-def get_sr_data(symbol):
-    # Penyesuaian simbol untuk perhitungan internal
-    yf_symbol = symbol.split(':')[-1]
-    if "BTC" in yf_symbol and "-" not in yf_symbol: yf_symbol = "BTC-USD"
-    if len(yf_symbol) == 4: yf_symbol = f"{yf_symbol}.JK"
+# --- ENGINE DATA ---
+@st.cache_data(ttl=60)
+def fetch_master_data(ticker, tf):
+    if len(ticker) == 4 and ".JK" not in ticker: ticker = f"{ticker}.JK"
+    elif len(ticker) >= 3 and "USDT" in ticker: ticker = ticker.replace("USDT", "-USD")
+    elif len(ticker) >= 3 and "-" not in ticker and ".JK" not in ticker: ticker = f"{ticker}-USD"
+    
+    interval_map = {"15m": "15m", "30m": "30m", "1h": "1h", "4h": "1h", "1d": "1d"}
+    p = "1mo" if tf in ["15m", "30m", "1h"] else "max"
     
     try:
-        df = yf.download(yf_symbol, period="1mo", interval="1h", progress=False)
+        df = yf.download(ticker, period=p, interval=interval_map[tf], progress=False, auto_adjust=True)
+        if df.empty: return pd.DataFrame(), ticker
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
-        # Matematika S&R & Sinyal
-        support_price = df['Low'].tail(50).min()
-        resistance_price = df['High'].tail(50).max()
-        
-        df['MA20'] = df['Close'].rolling(20).mean()
-        df['STD'] = df['Close'].rolling(20).std()
-        z_score = (df['Close'].iloc[-1] - df['MA20'].iloc[-1]) / df['STD'].iloc[-1]
-        atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-        
-        return {
-            "price": df['Close'].iloc[-1],
-            "sup": support_price,
-            "res": resistance_price,
-            "z": z_score,
-            "atr": atr
-        }
-    except:
-        return None
+        return df.astype(float), ticker
+    except: return pd.DataFrame(), ticker
 
-# 2. SIDEBAR CONTROL
-st.sidebar.title("🏛️ MEDALLION ALPHA")
-symbol_input = st.sidebar.text_input("Simbol (Contoh: BINANCE:BTCUSDT atau IDX:BBCA)", "BINANCE:BTCUSDT").upper()
-tf_input = st.sidebar.selectbox("Timeframe Chart", ["1", "5", "15", "60", "240", "D"], index=3)
+ticker_input = st.sidebar.text_input("Simbol", "BTC").upper()
+tf_input = st.sidebar.selectbox("Timeframe", ["15m", "30m", "1h", "4h", "1d"], index=2)
 
-# Jalankan Kalkulasi Angka Petunjuk
-sr_data = get_sr_data(symbol_input)
+df, final_ticker = fetch_master_data(ticker_input, tf_input)
 
-if sr_data:
-    # --- PANEL PETUNJUK ANGKA S&R ---
+if not df.empty and len(df) > 30:
+    # --- QUANT BRAIN (Z-SCORE, ADX, MFI) ---
+    
+    # Z-Score
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['STD'] = df['Close'].rolling(20).std()
+    df['Z'] = (df['Close'] - df['MA20']) / df['STD']
+    
+    # ADX (Trend Strength)
+    tr = pd.concat([df['High'] - df['Low'], (df['High'] - df['Close'].shift()).abs(), (df['Low'] - df['Close'].shift()).abs()], axis=1).max(axis=1)
+    plus_dm = df['High'].diff().clip(lower=0)
+    minus_dm = df['Low'].diff().clip(upper=0).abs()
+    atr_14 = tr.rolling(14).mean()
+    plus_di = 100 * (plus_dm.rolling(14).mean() / atr_14)
+    minus_di = 100 * (minus_dm.rolling(14).mean() / atr_14)
+    df['ADX'] = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di)).rolling(14).mean()
+    
+    # MFI (Money Flow Index) - Smart Money Filter
+    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+    money_flow = typical_price * df['Volume']
+    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
+    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
+    df['MFI'] = 100 - (100 / (1 + (positive_flow / negative_flow)))
+
+    last = df.iloc[-1]
+    
+    # 3. HEADER METRICS (ADX & MFI TAMPIL)
+    st.header(f"📊 {final_ticker} Terminal")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("PRICE", f"{last['Close']:,.2f}")
+    c2.metric("MFI (MONEY FLOW)", f"{last['MFI']:.1f}")
+    c3.metric("ADX (STRENGTH)", f"{last['ADX']:.1f}")
+
+    # LOGIKA AKURASI 80% (CONFLUENCE)
+    is_strong = last['ADX'] > 20
+    mfi_low = last['MFI'] < 30
+    mfi_high = last['MFI'] > 70
+    
+    if last['Z'] < -2.1 and is_strong and mfi_low:
+        sig_t, sig_c = "🚀 STRONG BUY (ALPHAS)", "#00FFCC"
+        st.toast("SIGNAL STRONG BUY TERDETEKSI!", icon="🚀")
+    elif last['Z'] > 2.1 and is_strong and mfi_high:
+        sig_t, sig_c = "🔻 STRONG SELL (ALPHAS)", "#FF3366"
+        st.toast("SIGNAL STRONG SELL TERDETEKSI!", icon="🔻")
+    else:
+        sig_t, sig_c = "⚪ SEARCHING...", "#999999"
+
+    c4.metric("ALGO SIGNAL", sig_t)
+
+    # 4. SIDEBAR S&R & PLAN
     st.sidebar.markdown("---")
     st.sidebar.subheader("💎 ANGKA PETUNJUK S&R")
-    st.sidebar.markdown(f"**Resistance:** <span style='color:#FF3366'>{sr_data['res']:,.2f}</span>", unsafe_allow_html=True)
-    st.sidebar.markdown(f"**Support:** <span style='color:#00FFCC'>{sr_data['sup']:,.2f}</span>", unsafe_allow_html=True)
-    
-    # Logic Sinyal
-    if sr_data['z'] < -2.1:
-        status, color = "🚀 LONG", "#00FFCC"
-        tp, sl = sr_data['price'] + (sr_data['atr']*2.5), sr_data['price'] - (sr_data['atr']*1.5)
-    elif sr_data['z'] > 2.1:
-        status, color = "🔻 SHORT", "#FF3366"
-        tp, sl = sr_data['price'] - (sr_data['atr']*2.5), sr_data['price'] + (sr_data['atr']*1.5)
-    else:
-        status, color = "⚪ NEUTRAL", "#999999"
-        tp, sl = sr_data['price'] * 1.03, sr_data['price'] * 0.98
+    sup, res = df['Low'].tail(50).min(), df['High'].tail(50).max()
+    st.sidebar.write(f"**Resistance:** :red[{res:,.2f}]")
+    st.sidebar.write(f"**Support:** :green[{sup:,.2f}]")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🎯 TRADING PLAN")
-    st.sidebar.markdown(f"**Status:** <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
-    st.sidebar.write(f"**Entry:** {sr_data['price']:,.2f}")
+    atr = tr.rolling(14).mean().iloc[-1]
+    tp = last['Close'] + (atr * 2.5) if "BUY" in sig_t else last['Close'] - (atr * 2.5)
+    sl = last['Close'] - (atr * 1.5) if "BUY" in sig_t else last['Close'] + (atr * 1.5)
+    
+    st.sidebar.markdown(f"**Status:** <span style='color:{sig_c}'>{sig_t}</span>", unsafe_allow_html=True)
+    st.sidebar.write(f"**Entry:** {last['Close']:,.2f}")
     st.sidebar.success(f"**TP:** {tp:,.2f}")
     st.sidebar.error(f"**SL:** {sl:,.2f}")
 
-# 3. MAIN DASHBOARD (TRADINGVIEW WIDGET)
-st.title(f"📊 Live Terminal: {symbol_input}")
-
-# Metrik Utama di Atas Chart
-if sr_data:
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Current Price", f"{sr_data['price']:,.2f}")
-    m2.metric("Guide Resistance", f"{sr_data['res']:,.0f}")
-    m3.metric("Guide Support", f"{sr_data['sup']:,.0f}")
-    m4.metric("Market Vol (ATR)", f"{sr_data['atr']:.2f}")
-
-# Widget TradingView Ukuran Besar
-tv_widget = f"""
-    <div style="height: 750px;">
-        <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-        <script type="text/javascript">
-        new TradingView.widget({{
-          "autosize": true,
-          "symbol": "{symbol_input}",
-          "interval": "{tf_input}",
-          "timezone": "Asia/Jakarta",
-          "theme": "dark",
-          "style": "1",
-          "locale": "id",
-          "toolbar_bg": "#f1f3f6",
-          "enable_publishing": false,
-          "allow_symbol_change": true,
-          "container_id": "tv_chart_container"
-        }});
-        </script>
-        <div id="tv_chart_container" style="height: 750px;"></div>
-    </div>
-"""
-components.html(tv_widget, height=760)
+    # 5. CHARTING (VISUAL TETAP)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.8, 0.2])
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+    fig.add_hline(y=sup, line_dash="dash", line_color="#00FFCC", opacity=0.4, row=1, col=1)
+    fig.add_hline(y=res, line_dash="dash", line_color="#FF3366", opacity=0.4, row=1, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='#363a45', name="Volume"), row=2, col=1)
+    fig.update_layout(height=750, template="plotly_dark", paper_bgcolor='#131722', plot_bgcolor='#131722', xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+    fig.update_yaxes(side="right", gridcolor='#2a2e39')
+    st.plotly_chart(fig, use_container_width=True)
